@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recursive-ai"
+version = "0.1.0"
+description = "Modular assistant with a recursive learning loop and human-gated major changes"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=2.3.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+recursive-ai = "recursive_ai.__main__:main"
+
+[tool.setuptools]
+packages = ["recursive_ai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
