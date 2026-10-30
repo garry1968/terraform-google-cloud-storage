@@ -36,7 +36,7 @@ def as_reply(task, answer):
     if task.kind == "grid":
         rows = "\n".join(" ".join(str(v) for v in row) for row in answer)
         return f"Working it out...\nAnswer:\n{rows}"
-    if task.kind == "names":
+    if task.kind in ("names", "order"):
         return f"Working it out...\nAnswer: {', '.join(answer)}"
     return f"Working it out...\nAnswer: {answer}"
 
@@ -61,15 +61,17 @@ def test_known_answers_grade_right_and_others_wrong():
                  "text": lambda a: a + "x",
                  "name": lambda a: next(n for n in task.choices if n != a),
                  "names": lambda a: sorted(set(task.choices) - set(a)),
+                 "order": lambda a: a[::-1],
                  "grid": lambda a: [[(v + 1) % 10 for v in row]
                                     for row in a]}[task.kind](task.answer)
         assert not grade(task, as_reply(task, wrong)), task.id
 
 
 def test_grader_reads_common_answer_formats():
-    number, name, names, grid, text = (
+    number, names, order, grid, text = (
         next(t for t in make_tasks("dev", 30) if t.kind == kind)
-        for kind in ("number", "name", "names", "grid", "text"))
+        for kind in ("number", "names", "order", "grid", "text"))
+    name = next(t for t in make_tasks("holdout", 30) if t.kind == "name")
     assert grade(number, f"So it is...\nAnswer: **{number.answer:,}**")
     assert grade(number, str(number.answer))
     assert not grade(number, f"Not {number.answer}: it is "
@@ -81,6 +83,9 @@ def test_grader_reads_common_answer_formats():
     assert grade(names, "Answer: " + " and ".join(reversed(names.answer)))
     extra = next(n for n in names.choices if n not in names.answer)
     assert not grade(names, "Answer: " + ", ".join(names.answer + [extra]))
+    assert grade(order, "Answer: " + " > ".join(order.answer))
+    swapped = order.answer[1:2] + order.answer[:1] + order.answer[2:]
+    assert not grade(order, "Answer: " + ", ".join(swapped))
     assert grade(text, f"Answer: `{text.answer}`")
 
 
@@ -88,7 +93,8 @@ def test_search_answers_match_hand_solved_puzzles():
     assert _jug_steps(3, 5, 4) == 6
     assert _coin_ways([1, 2, 5], 5) == 4
     # A-B-C is a triangle (6 ways); D and E are free (3 ways each).
-    assert _colourings([("A", "B"), ("B", "C"), ("A", "C")]) == 6 * 3 * 3
+    assert _colourings([("A", "B"), ("B", "C"), ("A", "C")],
+                       regions="ABCDE") == 6 * 3 * 3
     layouts = _tiles_by_distance()
     assert layouts[0] == [SOLVED]
     assert sum(len(v) for v in layouts.values()) == 181_440

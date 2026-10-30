@@ -40,7 +40,7 @@ class Task:
     family: str
     prompt: str
     answer: Any  # int, str, list of names, or Grid
-    kind: str  # "number", "name", "names", "text" or "grid"
+    kind: str  # "number", "name", "names", "order", "text" or "grid"
     choices: list[str] = field(default_factory=list)  # for name answers
 
 
@@ -55,22 +55,24 @@ def _run(source: str) -> str:
 # Mathematics ---------------------------------------------------------------
 
 def _divisible(rng: random.Random) -> Generated:
-    n = rng.randint(800, 9000)
-    a, b = rng.sample(range(3, 14), 2)
-    c = rng.choice([x for x in range(4, 40) if x not in (a, b)])
+    n = rng.randint(10_000, 99_999)
+    a, b, c = rng.sample(range(3, 20), 3)
+    d = rng.choice([x for x in range(4, 60) if x not in (a, b, c)])
     count = sum(1 for k in range(1, n + 1)
-                if (k % a == 0 or k % b == 0) and k % c)
-    return (f"How many whole numbers from 1 to {n} are divisible by {a} or "
-            f"by {b}, but not by {c}?{WHOLE_NUMBER}", count, "number", [])
+                if (k % a == 0 or k % b == 0 or k % c == 0) and k % d)
+    return (f"How many whole numbers from 1 to {n} are divisible by at least "
+            f"one of {a}, {b} and {c}, but not by {d}?{WHOLE_NUMBER}", count,
+            "number", [])
 
 
 def _digit_sums(rng: random.Random) -> Generated:
-    digits = rng.choice([4, 5])
-    total = rng.randint(digits + 3, 9 * digits - 6)
-    count = sum(1 for k in range(10 ** (digits - 1), 10 ** digits)
-                if sum(map(int, str(k))) == total)
-    return (f"How many {digits}-digit whole numbers have digits that add up "
-            f"to exactly {total}?{WHOLE_NUMBER}", count, "number", [])
+    total = rng.randint(12, 33)
+    count = sum(1 for k in range(10_000, 100_000)
+                if sum(map(int, str(k))) == total
+                and all(x != y for x, y in zip(str(k), str(k)[1:])))
+    return (f"How many 5-digit whole numbers have digits that add up to "
+            f"exactly {total}, with no two neighbouring digits the same?"
+            f"{WHOLE_NUMBER}", count, "number", [])
 
 
 def _coin_ways(coins: list[int], amount: int) -> int:
@@ -83,10 +85,10 @@ def _coin_ways(coins: list[int], amount: int) -> int:
 
 def _coins(rng: random.Random) -> Generated:
     while True:
-        coins = sorted(rng.sample([1, 2, 5, 10, 20, 50], rng.randint(3, 4)))
-        amount = rng.randint(40, 150)
+        coins = sorted(rng.sample([1, 2, 5, 10, 20, 50, 100], 5))
+        amount = rng.randint(150, 400)
         ways = _coin_ways(coins, amount)
-        if ways >= 5:
+        if ways >= 50:
             break
     names = ", ".join(f"{c}p" for c in coins)
     return (f"You have unlimited coins worth {names}. In how many different "
@@ -95,8 +97,8 @@ def _coins(rng: random.Random) -> Generated:
 
 
 def _powers(rng: random.Random) -> Generated:
-    base, power = rng.randint(3, 99), rng.randint(40, 999)
-    modulus = rng.choice([7, 13, 97, 100, 360, 1000])
+    base, power = rng.randint(13, 999), rng.randint(10_000, 999_999)
+    modulus = rng.choice([997, 1000, 2026, 9999, 10_000])
     return (f"What is the remainder when {base} to the power {power} is "
             f"divided by {modulus}?{WHOLE_NUMBER}",
             pow(base, power, modulus), "number", [])
@@ -106,7 +108,6 @@ def _powers(rng: random.Random) -> Generated:
 
 NAMES = ["Ava", "Ben", "Cara", "Dev", "Eli", "Fay", "Gus", "Hana", "Ivan",
          "Jo"]
-ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th"]
 
 
 def _minimal_clues(rng: random.Random, pool: list, worlds: list,
@@ -169,12 +170,11 @@ def _race(rng: random.Random) -> Generated:
                     "other.")
         return f"{args[0]} finished in an {kind}-numbered place."
 
-    place = rng.randrange(6)
     lines = "\n".join(f"- {say(c)}" for c in clues)
     return (f"Six runners, {', '.join(sorted(names))}, finished a race in "
-            f"different places with no ties.\nClues:\n{lines}\n\nWho "
-            f"finished {ORDINALS[place]}? {ANSWER_LINE}", order[place],
-            "name", names)
+            f"different places with no ties.\nClues:\n{lines}\n\nList all "
+            f"six runners in finishing order, first to last. {ANSWER_LINE}",
+            order, "order", names)
 
 
 def _knight_statements(names: list[str], speaker: str) -> list[tuple]:
@@ -195,9 +195,9 @@ def _knight_statements(names: list[str], speaker: str) -> list[tuple]:
 
 
 def _knights(rng: random.Random) -> Generated:
-    names = sorted(rng.sample(NAMES, 4))
+    names = sorted(rng.sample(NAMES, 5))
     worlds = [dict(zip(names, bits))
-              for bits in itertools.product([True, False], repeat=4)]
+              for bits in itertools.product([True, False], repeat=5)]
     for _ in range(1000):
         truth = rng.choice(worlds[1:-1])  # at least one of each kind
         said = {}
@@ -214,7 +214,7 @@ def _knights(rng: random.Random) -> Generated:
     lines = "\n".join(f'- {s} says: "{said[s][0]}"' for s in names)
     knights = [n for n in names if truth[n]]
     return ("On an island, knights always tell the truth and knaves always "
-            "lie, and everyone is one or the other. Four islanders speak:\n"
+            "lie, and everyone is one or the other. Five islanders speak:\n"
             f"{lines}\n\nWhich of them are knights? Give all their names. "
             f"{ANSWER_LINE}", knights, "names", names)
 
@@ -267,22 +267,24 @@ def _pets(rng: random.Random) -> Generated:
             f"{ANSWER_LINE}", owner, "name", people)
 
 
-def _colourings(edges: list[tuple[str, str]], regions: str = "ABCDE") -> int:
-    return sum(1 for colours in itertools.product(range(3),
-                                                  repeat=len(regions))
-               if all(colours[regions.index(a)] != colours[regions.index(b)]
+def _colourings(edges: list[tuple[str, str]], regions: str = "ABCDEFG",
+                colours: int = 3) -> int:
+    return sum(1 for paint in itertools.product(range(colours),
+                                                repeat=len(regions))
+               if all(paint[regions.index(a)] != paint[regions.index(b)]
                       for a, b in edges))
 
 
 def _colouring(rng: random.Random) -> Generated:
     while True:
-        edges = sorted(rng.sample(list(itertools.combinations("ABCDE", 2)),
-                                  rng.randint(5, 8)))
+        edges = sorted(rng.sample(list(itertools.combinations("ABCDEFG",
+                                                              2)),
+                                  rng.randint(9, 13)))
         count = _colourings(edges)
         if count:
             break
     borders = ", ".join(f"{a}-{b}" for a, b in edges)
-    return ("A map has five regions, A to E. These pairs of regions share a "
+    return ("A map has seven regions, A to G. These pairs of regions share a "
             f"border: {borders}. Each region is painted red, green or blue, "
             "and regions that share a border must be different colours. In "
             f"how many different ways can the map be painted?{WHOLE_NUMBER}",
@@ -404,8 +406,8 @@ def _recolour(rng: random.Random,
 def _grid_puzzle(rng: random.Random,
                  pick_steps: Callable[[list[int]], list]) -> Generated:
     for _ in range(500):
-        h, w = rng.randint(5, 8), rng.randint(5, 8)
-        palette = rng.sample(range(1, 10), rng.randint(2, 4))
+        h, w = rng.randint(7, 10), rng.randint(7, 10)
+        palette = rng.sample(range(1, 10), rng.randint(3, 4))
         steps = pick_steps(palette)
 
         def rule(g: Grid, steps: list = steps) -> Grid:
@@ -449,23 +451,26 @@ def _render(g: Grid) -> str:
 
 def _grid_geometry(rng: random.Random) -> Generated:
     return _grid_puzzle(rng, lambda palette: [
-        rng.choice(GEOMETRY),
+        rng.choice(GEOMETRY), rng.choice(GEOMETRY),
         rng.choice(GEOMETRY + [_recolour(rng, palette)])])
 
 
 def _grid_objects(rng: random.Random) -> Generated:
-    return _grid_puzzle(rng, lambda palette: [rng.choice(OBJECT_RULES)] + (
-        [rng.choice(GEOMETRY)] if rng.random() < 0.5 else []))
+    return _grid_puzzle(rng, lambda palette: [
+        rng.choice(OBJECT_RULES), rng.choice(GEOMETRY),
+        rng.choice(GEOMETRY + [_recolour(rng, palette)])])
 
 
 def _grid_fill(rng: random.Random) -> Generated:
-    return _grid_puzzle(rng, lambda palette: [rng.choice(FILL_RULES)] + (
-        [_recolour(rng, palette)] if rng.random() < 0.4 else []))
+    return _grid_puzzle(rng, lambda palette: [
+        rng.choice(FILL_RULES),
+        rng.choice(MIRROR_RULES + [_recolour(rng, palette)])])
 
 
 def _grid_mirror(rng: random.Random) -> Generated:
-    return _grid_puzzle(rng, lambda palette: [rng.choice(MIRROR_RULES)] + (
-        [rng.choice(FILL_RULES)] if rng.random() < 0.4 else []))
+    return _grid_puzzle(rng, lambda palette: [
+        rng.choice(MIRROR_RULES),
+        rng.choice(FILL_RULES + [_recolour(rng, palette)])])
 
 
 # Planning: shortest solutions found by search ------------------------------
@@ -497,7 +502,7 @@ def _key_maze_moves(maze: list[str], start: tuple[int, int]) -> int | None:
 
 def _key_maze(rng: random.Random) -> Generated:
     while True:
-        h, w = rng.randint(6, 8), rng.randint(7, 9)
+        h, w = rng.randint(8, 10), rng.randint(9, 11)
         cells = [["#" if rng.random() < 0.28 else "." for _ in range(w)]
                  for _ in range(h)]
         open_cells = [(r, c) for r in range(h) for c in range(w)
@@ -510,7 +515,7 @@ def _key_maze(rng: random.Random) -> Generated:
         maze = ["".join(row) for row in cells]
         without_key = [row.replace("k", ".") for row in maze]
         moves = _key_maze_moves(maze, start)
-        if (moves is not None and moves >= 10
+        if (moves is not None and moves >= 18
                 and _key_maze_moves(without_key, start) is None):
             break
     cells[start[0]][start[1]] = "S"
@@ -540,10 +545,10 @@ def _jug_steps(a: int, b: int, target: int) -> int | None:
 
 def _jugs(rng: random.Random) -> Generated:
     while True:
-        a, b = sorted(rng.sample(range(3, 16), 2))
+        a, b = sorted(rng.sample(range(5, 30), 2))
         target = rng.randint(1, b - 1)
         steps = _jug_steps(a, b, target)
-        if target != a and steps is not None and steps >= 5:
+        if target != a and steps is not None and steps >= 10:
             break
     return (f"You have an empty {a}-litre jug, an empty {b}-litre jug and a "
             "tap. One step is filling a jug to the top from the tap, "
@@ -572,7 +577,7 @@ def _ice_moves(floor: list[str], start: tuple[int, int]) -> int | None:
 
 def _ice(rng: random.Random) -> Generated:
     while True:
-        h, w = rng.randint(7, 9), rng.randint(7, 9)
+        h, w = rng.randint(9, 11), rng.randint(9, 11)
         cells = [["#" if rng.random() < 0.18 else "." for _ in range(w)]
                  for _ in range(h)]
         open_cells = [(r, c) for r in range(h) for c in range(w)
@@ -582,7 +587,7 @@ def _ice(rng: random.Random) -> Generated:
         start, goal = rng.sample(open_cells, 2)
         cells[goal[0]][goal[1]] = "G"
         moves = _ice_moves(["".join(row) for row in cells], start)
-        if moves is not None and moves >= 4:
+        if moves is not None and moves >= 7:
             break
     cells[start[0]][start[1]] = "S"
     picture = "\n".join("".join(row) for row in cells)
@@ -626,7 +631,7 @@ def _board(state: tuple[int, ...]) -> str:
 
 
 def _tiles(rng: random.Random) -> Generated:
-    moves = rng.randint(10, 18)
+    moves = rng.randint(18, 26)
     state = rng.choice(_tiles_by_distance()[moves])
     return ("This is a sliding puzzle on a 3 by 3 board with eight numbered "
             "tiles and a gap (_). A move slides one tile that is next to the "
@@ -647,11 +652,13 @@ WORDS = ["planet", "orange", "quartz", "banana", "eclipse", "rhythm",
 def _trace(rng: random.Random) -> Generated:
     form = rng.randrange(3)
     if form == 0:
-        a, b, k = rng.randint(4, 9), rng.randint(8, 14), rng.randint(3, 7)
+        a, b, k = rng.randint(9, 15), rng.randint(14, 22), rng.randint(3, 7)
         source = (f"total = 0\nfor i in range(1, {a}):\n"
                   f"    for j in range(i, {b}):\n"
                   f"        if (i * j) % {k} == {rng.randrange(k)}:\n"
-                  "            total += i - j\nprint(total)")
+                  "            total += i - j\n"
+                  "        elif (i + j) % 5 == 0:\n"
+                  "            total *= -1\nprint(total)")
     elif form == 1:
         source = (f'word = "{rng.choice(WORDS)}"\nout = []\n'
                   "for i, ch in enumerate(word):\n"
@@ -661,7 +668,7 @@ def _trace(rng: random.Random) -> Generated:
                   "    else:\n        out.append(str(i))\n"
                   'print("".join(out))')
     else:
-        numbers = [rng.randint(2, 30) for _ in range(rng.randint(5, 7))]
+        numbers = [rng.randint(2, 30) for _ in range(rng.randint(9, 12))]
         source = (f"xs = {numbers}\nwhile len(xs) > 1:\n"
                   "    a = xs.pop(0)\n    b = xs.pop(0)\n"
                   f"    xs.append((a * b + {rng.randint(1, 9)}) % "
@@ -686,9 +693,9 @@ def _inverse(rng: random.Random) -> Generated:
         source = f"def check(n):\n{body}"
         namespace: dict[str, Any] = {}
         exec(source, namespace)  # noqa: S102 - generated here
-        answer = next((n for n in range(1, 200_000)
+        answer = next((n for n in range(1, 300_000)
                        if namespace["check"](n)), None)
-        if answer is not None and answer > 50:
+        if answer is not None and answer > 1000:
             break
     return (f"Here is a Python function:\n\n```python\n{source}\n```\n\nWhat "
             "is the smallest positive whole number n for which check(n) "
@@ -701,18 +708,19 @@ def _recursion(rng: random.Random) -> Generated:
               "    if n % 2 == 0:\n"
               f"        return f(n - 1, k) + {a} * f(n // 2, k - 1)\n"
               f"    return f(n - 2, k) - {b} * k + {c}\n\n"
-              f"print(f({rng.randint(6, 11)}, {rng.randint(2, 4)}))")
+              f"print(f({rng.randint(12, 17)}, {rng.randint(3, 5)}))")
     return (f"What does this Python program print?\n\n```python\n{source}\n"
             f"```\n\n{ANSWER_LINE}", int(_run(source)), "number", [])
 
 
 def _count_strings(rng: random.Random) -> Generated:
     while True:
-        pattern = rng.choice(["aa", "bb", "aba", "bab", "abb", "bba"])
-        length = rng.randint(8, 12)
-        bs = rng.randint(2, length // 2)
-        source = (f'def ok(s):\n    return "{pattern}" not in s and '
-                  f's.count("b") == {bs}')
+        first, second = rng.sample(["aaa", "bb", "aba", "bab", "abb",
+                                    "bba"], 2)
+        length = rng.randint(13, 16)
+        bs = rng.randint(3, length // 2)
+        source = (f'def ok(s):\n    return "{first}" not in s and '
+                  f'"{second}" not in s and s.count("b") == {bs}')
         namespace: dict[str, Any] = {}
         exec(source, namespace)  # noqa: S102 - generated here
         count = sum(1 for letters in itertools.product("ab", repeat=length)
@@ -748,8 +756,8 @@ def _rule_puzzle(rng: random.Random, types: list[str]) -> Generated:
     for _ in range(500):
         rule = RULE_TYPES[rng.choice(types)]
         a, b = rng.choice(A_RANGE), rng.choice(B_RANGE)
-        xs = rng.sample(range(10, 200), 6)
-        examples, query = xs[:5], xs[5]
+        # Few examples, and the question asks well outside their range.
+        examples, query = rng.sample(range(10, 200), 4), rng.randint(300, 999)
         outputs = [rule(x, a, b) for x in examples]
         answer = rule(query, a, b)
         # Reject a rule that another rule type or setting also explains.
@@ -866,6 +874,14 @@ def grade(task: Task, reply: str) -> bool:
         named = sorted(n for n in task.choices if has_term(final, n))
         expected = [task.answer] if task.kind == "name" else task.answer
         return named == sorted(expected)
+    if task.kind == "order":
+        found = []
+        for name in task.choices:
+            at = re.search(rf"(?<![\w.]){re.escape(name)}(?!\w)", final,
+                           re.IGNORECASE)
+            if at:
+                found.append((at.start(), name))
+        return [name for _, name in sorted(found)] == task.answer
     if task.kind == "text":
         first = final.splitlines()[0] if final else ""
         return first.strip().strip("`'\"*") == task.answer
