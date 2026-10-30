@@ -12,9 +12,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import ConfigError, ConfigStore, apply_change, prompt_for
+from .config import (
+    ConfigError,
+    ConfigStore,
+    apply_change,
+    prompt_for,
+    recurring_threshold,
+)
 from .evaluator import Evaluation
-from .llm import LLM, LLMError
+from .llm import LLM, BudgetExceeded, LLMError
 from .memory import MemoryStore
 from .planner import sections
 from .safety import (
@@ -64,6 +70,14 @@ CaseRunner = Callable[[dict[str, Any], dict[str, Any]], float]
 # proposed again.
 FAILED_CHANGE_MODES = ("change_rolled_back", "change_rejected")
 
+# Issues that still count when an answer passes. One that keeps coming back
+# triggers learning even though no answer failed.
+RECURRING_MODES = ("ungrounded_math", "low_confidence", "tool_error",
+                   "permission_denied")
+# Logged when learning runs for an issue, so its count starts again.
+RECURRING_MARK = "recurring_issue_addressed"
+BOOKKEEPING_MODES = FAILED_CHANGE_MODES + (RECURRING_MARK,)
+
 
 def signature(proposal: ChangeProposal) -> str:
     return json.dumps({"target": proposal.target,
@@ -94,6 +108,7 @@ class Outcome:
 class LearningReport:
     failure_modes: list[str] = field(default_factory=list)
     outcomes: list[Outcome] = field(default_factory=list)
+    stopped: str = ""  # why learning stopped early, e.g. the API budget
 
     def with_status(self, *statuses: str) -> list[Outcome]:
         return [o for o in self.outcomes if o.status in statuses]
@@ -114,34 +129,61 @@ class LearningController:
     def after_episode(self, episode: dict[str, Any],
                       evaluation: Evaluation) -> LearningReport:
         report = LearningReport(failure_modes=evaluation.modes)
-        if evaluation.passed:
+        passed = evaluation.passed
+        if passed:
             self.memory.log_pattern("success", "passed",
                                     episode["request"][:200], episode["id"])
-            return report
-
+        # A passing answer still logs the issues that matter if they recur.
         for issue in evaluation.issues:
-            self.memory.log_pattern("error", issue.mode, issue.detail,
-                                    episode["id"])
+            if not passed or issue.mode in RECURRING_MODES:
+                self.memory.log_pattern("error", issue.mode, issue.detail,
+                                        episode["id"])
         config = self.store.current
         if not config["learning"]["enabled"]:
             return report
 
-        # The failing request joins the regression suite, so any change it
+        trigger = "The answer failed its checks."
+        recurring = sorted({i.mode for i in evaluation.issues}
+                           & set(RECURRING_MODES))
+        if passed:
+            threshold = recurring_threshold(config)
+            due = [mode for mode in recurring
+                   if self.memory.count_since(mode, RECURRING_MARK)
+                   >= threshold]
+            if not due:
+                return report
+            trigger = (f"The answer passed, but {', '.join(due)} has come "
+                       f"up {threshold} or more times since it was last "
+                       "addressed.")
+        for mode in recurring:
+            self.memory.log_pattern("error", RECURRING_MARK, mode,
+                                    episode["id"])
+
+        # The request joins the regression suite, so any change it
         # motivates is retested against it.
-        case = self.memory.add_benchmark(episode["request"], "failure")
-        for proposal in self.propose(episode, evaluation, config):
-            proposal.evidence = [episode["id"]]
-            proposal.cases = [case["id"]]
-            report.outcomes.append(self.route(proposal))
+        case = self.memory.add_benchmark(episode["request"],
+                                         "recurring" if passed else "failure")
+        try:
+            for proposal in self.propose(episode, evaluation, config,
+                                         trigger):
+                proposal.evidence = [episode["id"]]
+                proposal.cases = [case["id"]]
+                report.outcomes.append(self.route(proposal))
+        except BudgetExceeded as exc:
+            report.stopped = str(exc)
+            self.audit.record("learning_stopped", episode=episode["id"],
+                              reason=str(exc))
         return report
 
     def propose(self, episode: dict[str, Any], evaluation: Evaluation,
-                config: dict[str, Any]) -> list[ChangeProposal]:
+                config: dict[str, Any],
+                trigger: str = "") -> list[ChangeProposal]:
         limit = config["learning"]["max_proposals_per_episode"]
         visible = {k: config[k] for k in VISIBLE_SECTIONS}
         failed = self.failed_changes()
         prompt = sections(
-            failed_request=episode["request"],
+            request=episode["request"],
+            outcome=trigger,
             answer_given=episode["answer"],
             failure_modes=", ".join(evaluation.modes),
             issues="\n".join(f"- [{i.mode}] {i.detail}"
@@ -149,7 +191,7 @@ class LearningController:
             recurring_failures=json.dumps(
                 {mode: n for mode, n
                  in self.memory.pattern_counts("error").most_common(10)
-                 if mode not in FAILED_CHANGE_MODES}),
+                 if mode not in BOOKKEEPING_MODES}),
             current_config=json.dumps(visible, indent=2),
             changes_already_tried_and_failed="\n".join(sorted(failed)[-10:]),
             limits=f"Propose at most {limit} changes. Targets are dotted "
@@ -257,7 +299,12 @@ class LearningController:
             self.queue.update(proposal)
             return Outcome(proposal.id, proposal.target, proposal.risk,
                            "rejected", "locked section")
-        outcome = self.apply_and_validate(proposal, approved=True)
+        try:
+            outcome = self.apply_and_validate(proposal, approved=True)
+        except BudgetExceeded:
+            # Back in the queue: approving it again re-runs the retest.
+            self.queue.submit(proposal)
+            raise
         self.queue.update(proposal)
         return outcome
 
@@ -316,7 +363,18 @@ class LearningController:
             self.audit.record("applied", proposal=proposal.id,
                               version=version, risk=proposal.risk, how=how)
 
-            candidate = self.run_suite(cases, self.store.current)
+            try:
+                candidate = self.run_suite(cases, self.store.current)
+            except BudgetExceeded as exc:
+                # Never leave an untested change live. It is not logged as
+                # a failed change, so it can be proposed again later.
+                self.store.rollback(config["version"],
+                                    f"{proposal.id}: retest stopped: {exc}")
+                self.audit.record("rolled_back", proposal=proposal.id,
+                                  to_version=config["version"],
+                                  reason=f"retest stopped: {exc}")
+                proposal.note("interrupted", reason=str(exc))
+                raise
             decision, detail = self.verdict(baseline, candidate, policy,
                                             approved)
             self.audit.record("retested", proposal=proposal.id,

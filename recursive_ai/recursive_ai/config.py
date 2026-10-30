@@ -138,6 +138,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_refinements": 1,
         "max_benchmark_cases": 5,
         "max_proposals_per_episode": 2,
+        # Learn from an issue that keeps coming back on answers that pass.
+        "recurring_issue_threshold": 3,
     },
 }
 
@@ -208,6 +210,13 @@ def apply_change(
     return new
 
 
+def recurring_threshold(config: dict[str, Any]) -> int:
+    """Configs saved before this setting existed use the default."""
+    return config["learning"].get(
+        "recurring_issue_threshold",
+        DEFAULT_CONFIG["learning"]["recurring_issue_threshold"])
+
+
 def prompt_for(config: dict[str, Any], component: str) -> str:
     """Base prompt for a component plus any learned guidance lines."""
     prompt = config["prompts"][component]
@@ -270,6 +279,9 @@ def validate_config(config: dict[str, Any]) -> None:
              "evaluator.pass_threshold must be in 0-1")
     _require(config["learning"]["auto_apply_max_risk"] in ("none", "low", "medium"),
              "learning.auto_apply_max_risk must be none, low or medium")
+    _require(isinstance(recurring_threshold(config), int)
+             and recurring_threshold(config) >= 2,
+             "learning.recurring_issue_threshold must be an int >= 2")
 
 
 class ConfigStore:

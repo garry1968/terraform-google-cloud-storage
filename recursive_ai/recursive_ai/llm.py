@@ -22,6 +22,14 @@ class LLMRefusal(LLMError):
     """The model declined the request (stop_reason == "refusal")."""
 
 
+class BudgetExceeded(RuntimeError):
+    """The run reached its API spending cap. Raised before the next call.
+
+    Deliberately not an LLMError: components that degrade gracefully on a
+    model error must not keep going once the money is spent.
+    """
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -55,6 +63,67 @@ DEFAULT_EFFORT = {
     "refine": "high",
 }
 
+# US dollars per million tokens: (input, output, cache read). Cache writes
+# bill at 1.25x input. A model missing here is priced as the dearest one, so
+# the spending cap errs on the safe side.
+PRICES = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-fable-5-1": (10.00, 50.00, 0.25),
+}
+
+
+@dataclass
+class Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0  # estimated US dollars
+
+    def add(self, usage: Any, model: str) -> None:
+        price_in, price_out, price_read = next(
+            (p for name, p in PRICES.items() if model.startswith(name)),
+            max(PRICES.values()))
+
+        def count(name: str) -> int:
+            return getattr(usage, name, 0) or 0
+
+        fresh = count("input_tokens")
+        written = count("cache_creation_input_tokens")
+        read = count("cache_read_input_tokens")
+        out = count("output_tokens")
+        self.input_tokens += fresh + written + read
+        self.output_tokens += out
+        self.cost += (fresh * price_in + written * price_in * 1.25
+                      + read * price_read + out * price_out) / 1_000_000
+
+
+class Budget:
+    """Caps the model calls and estimated spend of one run. Wraps any LLM."""
+
+    def __init__(self, llm: LLM, max_calls: int, max_cost: float):
+        self.llm = llm
+        self.max_calls = max_calls
+        self.max_cost = max_cost
+        self.calls = 0
+
+    @property
+    def cost(self) -> float:
+        usage = getattr(self.llm, "usage", None)
+        return usage.cost if usage else 0.0
+
+    def generate(self, **kwargs: Any) -> LLMResponse:
+        if self.calls >= self.max_calls:
+            raise BudgetExceeded(
+                f"reached the cap of {self.max_calls} API calls")
+        if self.cost >= self.max_cost:
+            raise BudgetExceeded(
+                f"reached the ${self.max_cost:.2f} spending cap")
+        self.calls += 1
+        return self.llm.generate(**kwargs)
+
+    def summary(self) -> str:
+        return f"API use: {self.calls} calls, about ${self.cost:.2f}"
+
 
 class ClaudeLLM:
     def __init__(self, model: str = "claude-opus-5-5",
@@ -67,6 +136,7 @@ class ClaudeLLM:
         self.model = model
         self.effort = {**DEFAULT_EFFORT, **(effort or {})}
         self.max_tokens = max_tokens
+        self.usage = Usage()
 
     def generate(self, *, purpose, system, messages, tools=None,
                  schema=None) -> LLMResponse:
@@ -101,6 +171,10 @@ class ClaudeLLM:
         except anthropic.APIConnectionError as exc:
             raise LLMError(f"connection error: {exc}") from exc
 
+        # Recorded before the checks below: a declined or truncated
+        # response is still billed.
+        self.usage.add(response.usage,
+                       getattr(response, "model", None) or self.model)
         if response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             category = getattr(details, "category", None)

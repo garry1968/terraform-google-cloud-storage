@@ -6,6 +6,7 @@ output, then hands the episode to the learning controller.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,12 @@ from typing import Any
 from .config import ConfigStore
 from .evaluator import Evaluation, Evaluator
 from .interface import InputRejected, parse_input
-from .learning import LearningController, Outcome, SuiteResult, signature
-from .llm import LLM, LLMError, LLMRefusal
+from .learning import LearningController, LearningReport, Outcome, signature
+from .llm import LLM, BudgetExceeded, LLMError, LLMRefusal
 from .memory import MemoryStore
 from .output import OutputLayer, Reply
 from .planner import Plan, Planner
+from .practice import PRACTICE_SET
 from .responder import Draft, Responder
 from .safety import ApprovalQueue, AuditLog, ChangeProposal, ContentScreen
 from .tools import ToolRouter, default_tools
@@ -31,6 +33,14 @@ class PipelineResult:
     evaluation: Evaluation
     attempts: int
     revisions: int
+
+
+@dataclass
+class PracticeResult:
+    case: dict[str, Any]
+    result: PipelineResult | None = None
+    report: LearningReport | None = None
+    error: str = ""
 
 
 class Orchestrator:
@@ -92,6 +102,11 @@ class Orchestrator:
 
     def run_pipeline(self, request: str, config: dict[str, Any],
                      expected: dict[str, Any] | None = None) -> PipelineResult:
+        """Plan, answer and self-correct, then grade.
+
+        Self-correction sees only what it would see in real use. A known
+        answer is checked once at the end, so it never leaks into a revision.
+        """
         hints = self.router.route_hints(request, config)
         memories = self.memory.retrieve(request, config["memory_policy"])
         plan = self.planner.plan(request, hints, memories, config)
@@ -106,7 +121,7 @@ class Orchestrator:
             draft = self.responder.respond(request, plan, hints, memories,
                                            config)
             attempts.append((draft, self.evaluator.evaluate(
-                request, draft, config, expected)))
+                request, draft, config)))
         best_draft, best_eval = max(attempts, key=lambda a: a[1].score)
 
         revisions = 0
@@ -118,12 +133,14 @@ class Orchestrator:
             draft = self.responder.respond(request, plan, hints, memories,
                                            config, feedback=feedback,
                                            previous=best_draft.answer)
-            evaluation = self.evaluator.evaluate(request, draft, config,
-                                                 expected)
+            evaluation = self.evaluator.evaluate(request, draft, config)
             revisions += 1
             if evaluation.score >= best_eval.score:
                 best_draft, best_eval = draft, evaluation
 
+        if expected:
+            best_eval = self.evaluator.check_expected(
+                best_eval, best_draft.answer, expected, config)
         return PipelineResult(request, plan, best_draft, best_eval,
                               n + revisions, revisions)
 
@@ -132,13 +149,48 @@ class Orchestrator:
         config = self.store.current
         try:
             retry = self.run_pipeline(result.request, config)
-        except LLMError:
+        except (LLMError, BudgetExceeded):
             return result, False
         if retry.evaluation.score <= result.evaluation.score:
             return result, False
         self.memory.add_episode(self._episode(retry, config),
                                 config["memory_policy"])
         return retry, True
+
+    # Unattended learning ----------------------------------------------------
+
+    def practice(self, limit: int,
+                 cases: list[dict[str, Any]] | None = None
+                 ) -> Iterator[PracticeResult]:
+        """Answer questions with known answers and learn from the mistakes.
+
+        Works through the least recently practised cases first, so repeated
+        runs cover the whole set.
+        """
+        self.memory.add_practice_cases(PRACTICE_SET if cases is None
+                                       else cases)
+        for case in self.memory.next_practice_cases(limit):
+            config = self.store.current
+            try:
+                result = self.run_pipeline(case["request"], config,
+                                           case["expected"])
+            except LLMError as exc:
+                mode = "refusal" if isinstance(exc, LLMRefusal) \
+                    else "llm_error"
+                self.memory.log_pattern("error", mode, str(exc))
+                self.memory.mark_practiced(case)
+                yield PracticeResult(case, error=str(exc))
+                continue
+            self.memory.mark_practiced(case)
+            episode = self.memory.add_episode(self._episode(result, config),
+                                              config["memory_policy"])
+            report = None
+            if config["learning"]["enabled"]:
+                report = self.learner.after_episode(episode,
+                                                    result.evaluation)
+            yield PracticeResult(case, result, report)
+            if report and report.stopped:
+                return
 
     def _score_case(self, case: dict[str, Any],
                     config: dict[str, Any]) -> float:
@@ -189,6 +241,10 @@ class Orchestrator:
                           new_version=new_version, by=approver)
         return new_version
 
-    def benchmark(self) -> SuiteResult:
+    def benchmark(self) -> Iterator[tuple[str, float]]:
+        """Score each regression case in turn, so a run that stops at the
+        spending cap still shows the cases it finished."""
         config = self.store.current
-        return self.learner.run_suite(self.memory.benchmarks, config)
+        for case in self.memory.benchmarks:
+            yield case["id"], self.learner.run_suite([case],
+                                                     config).scores[case["id"]]
