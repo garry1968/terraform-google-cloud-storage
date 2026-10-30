@@ -29,6 +29,12 @@ class ScriptedLLM(OfflineLLM):
                                 schema=schema)
 
 
+@pytest.fixture(autouse=True)
+def no_saved_memory(monkeypatch):
+    # Tests must never load from, or save to, a real memory repository.
+    monkeypatch.delenv("RECURSIVE_AI_MEMORY_REPO", raising=False)
+
+
 @pytest.fixture
 def make_ai(tmp_path):
     def make(llm=None):
