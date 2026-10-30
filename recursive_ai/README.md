@@ -125,14 +125,24 @@ python -m recursive_ai baseline --split dev --per-category 2 --trials 1 --out re
 
 ## Spending cap
 
-Every command that calls the model stops once its estimated spend reaches
-`--max-cost` (US dollars, default 1.00) or it has made `--max-calls`
-(default 300), whichever comes first, and exits with code 3. The last call
-can take it slightly over. Spend is estimated from each response's token
-usage at the model's list price. A change whose retest is cut short is
-rolled back and not counted as failed; an approved one goes back in the
+Every command that calls the model stops at `--max-cost` (US dollars,
+default 1.00) or `--max-calls` (default 300), whichever comes first, and
+exits with code 3. A call starts only if the run would stay within
+`--max-cost` even if that call cost the most it can: all `max_tokens` of
+output, plus the request counted at 2 characters per token. So a run never
+goes over its cap, but it may stop with up to one call's worth unspent
+(about $0.33 on Claude Opus 5.5, under $0.01 on Claude Haiku 5.5).
+
+Spend is estimated from each response's token usage at the list prices in
+`llm.py`, so it is only as accurate as that table. `--max-calls` counts
+every model call, including tool rounds, self-checks and revisions. When the
+SDK retries a failed request (up to twice, after rate-limit or server
+errors), that still counts as one call. A change whose retest is cut short
+is rolled back and not counted as failed; an approved one goes back in the
 approval queue. Learning is the expensive part: one failure can retest two
-changes on up to `learning.max_benchmark_cases` cases each.
+changes on up to `learning.max_benchmark_cases` cases each. With
+`learning.auto_apply_max_risk` set to `none` (proposals only), nothing is
+retested until you approve it.
 
 ## Risk rules
 

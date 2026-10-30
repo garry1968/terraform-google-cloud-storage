@@ -78,6 +78,10 @@ def test_baseline_runs_every_condition_and_changes_nothing(make_ai,
 
     assert len(results) == len(tasks) * len(CONDITIONS) * 2
     assert {r.condition for r in results} == set(CONDITIONS)
+    calls = {c: {r.calls for r in results if r.condition == c}
+             for c in CONDITIONS}
+    assert calls["plain"] == {1}
+    assert min(calls["full"]) >= 3  # plan, answer and self-check at least
     after = {p: p.read_bytes() for p in state.rglob("*") if p.is_file()}
     assert after == before
 

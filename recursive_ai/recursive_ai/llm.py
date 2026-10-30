@@ -74,6 +74,11 @@ PRICES = {
 }
 
 
+def price_of(model: str) -> tuple[float, float, float]:
+    return next((p for name, p in PRICES.items() if model.startswith(name)),
+                max(PRICES.values()))
+
+
 @dataclass
 class Usage:
     input_tokens: int = 0
@@ -81,9 +86,7 @@ class Usage:
     cost: float = 0.0  # estimated US dollars
 
     def add(self, usage: Any, model: str) -> None:
-        price_in, price_out, price_read = next(
-            (p for name, p in PRICES.items() if model.startswith(name)),
-            max(PRICES.values()))
+        price_in, price_out, price_read = price_of(model)
 
         def count(name: str) -> int:
             return getattr(usage, name, 0) or 0
@@ -99,7 +102,11 @@ class Usage:
 
 
 class Budget:
-    """Caps the model calls and estimated spend of one run. Wraps any LLM."""
+    """Caps the model calls and estimated spend of one run. Wraps any LLM.
+
+    A call starts only if the estimated spend stays within the cap even if
+    that call costs the most it can, so a run never goes over its cap.
+    """
 
     def __init__(self, llm: LLM, max_calls: int, max_cost: float):
         self.llm = llm
@@ -116,9 +123,13 @@ class Budget:
         if self.calls >= self.max_calls:
             raise BudgetExceeded(
                 f"reached the cap of {self.max_calls} API calls")
-        if self.cost >= self.max_cost:
+        worst_case = getattr(self.llm, "max_call_cost", None)
+        if self.cost + (worst_case(**kwargs) if worst_case else 0.0) \
+                > self.max_cost:
             raise BudgetExceeded(
-                f"reached the ${self.max_cost:.2f} spending cap")
+                f"reached the ${self.max_cost:.2f} spending cap (spent "
+                f"about ${self.cost:.2f}; the next call could have gone "
+                "over)")
         self.calls += 1
         return self.llm.generate(**kwargs)
 
@@ -138,6 +149,15 @@ class ClaudeLLM:
         self.effort = {**DEFAULT_EFFORT, **(effort or {})}
         self.max_tokens = max_tokens
         self.usage = Usage()
+
+    def max_call_cost(self, *, system="", messages=(), tools=None,
+                      schema=None, **_: Any) -> float:
+        """The most this call can cost: every output token used, and the
+        request counted at 2 characters per token, which overestimates."""
+        price_in, price_out, _read = price_of(self.model)
+        request = json.dumps([system, messages, tools, schema], default=str)
+        return (len(request) / 2 * price_in
+                + self.max_tokens * price_out) / 1_000_000
 
     def generate(self, *, purpose, system, messages, tools=None,
                  schema=None) -> LLMResponse:

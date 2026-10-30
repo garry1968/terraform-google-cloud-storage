@@ -44,7 +44,9 @@ class TrialResult:
     correct: bool
     cost: float  # estimated US dollars
     seconds: float
+    calls: int = 0  # model calls, including tool rounds and revisions
     error: str = ""
+    reply: str = ""  # kept so every grade can be checked by hand
 
 
 class Baseline:
@@ -64,6 +66,10 @@ class Baseline:
     @property
     def cost(self) -> float:
         return getattr(self.llm, "cost", 0.0)
+
+    @property
+    def calls(self) -> int:
+        return getattr(self.llm, "calls", 0)
 
     def answer(self, condition: str, task: Task) -> str:
         if condition == "plain":
@@ -86,15 +92,17 @@ class Baseline:
         for trial in range(1, trials + 1):
             for task in tasks:
                 for condition in conditions:
-                    cost, start = self.cost, time.monotonic()
+                    cost, calls = self.cost, self.calls
+                    start = time.monotonic()
                     try:
-                        correct, error = grade(task, self.answer(condition,
-                                                                 task)), ""
+                        reply = self.answer(condition, task)
+                        correct, error = grade(task, reply), ""
                     except LLMError as exc:
-                        correct, error = False, str(exc)
+                        reply, correct, error = "", False, str(exc)
                     yield TrialResult(task.id, task.category, condition,
                                       trial, correct, self.cost - cost,
-                                      time.monotonic() - start, error)
+                                      time.monotonic() - start,
+                                      self.calls - calls, error, reply)
 
 
 def sign_test(wins: int, losses: int) -> float:
@@ -116,14 +124,16 @@ def summarize(results: list[TrialResult],
               conditions: tuple[str, ...]) -> list[str]:
     if not results:
         return ["No tasks finished."]
-    lines = ["Condition   Correct     Cost/task  Time/task  Errors"]
+    lines = ["Condition   Correct     Cost/task  Calls/task  Time/task  "
+             "Errors"]
     for c in conditions:
         rs = _matching(results, condition=c)
         if rs:
             right, n = sum(r.correct for r in rs), len(rs)
             lines.append(
                 f"{c:<10}{right:>4}/{n:<3}{right / n:>5.0%}   "
-                f"${sum(r.cost for r in rs) / n:.3f}     "
+                f"${sum(r.cost for r in rs) / n:.4f}    "
+                f"{sum(r.calls for r in rs) / n:5.1f}     "
                 f"{sum(r.seconds for r in rs) / n:5.1f}s   "
                 f"{sum(1 for r in rs if r.error):>4}")
 
