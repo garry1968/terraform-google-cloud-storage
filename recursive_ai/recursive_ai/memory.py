@@ -119,6 +119,16 @@ class MemoryStore:
     def pattern_counts(self, kind: str) -> Counter:
         return Counter(p["mode"] for p in self.data["patterns"][kind])
 
+    def count_since(self, mode: str, marker: str) -> int:
+        """Error patterns of this mode logged since the last marker for it."""
+        count = 0
+        for p in self.data["patterns"]["error"]:
+            if p["mode"] == marker and p["detail"] == mode:
+                count = 0
+            elif p["mode"] == mode:
+                count += 1
+        return count
+
     # Regression suite -----------------------------------------------------
 
     @property
@@ -136,13 +146,48 @@ class MemoryStore:
         self.save()
         return case
 
+    def add_practice_cases(self, cases: list[dict[str, Any]]) -> None:
+        """Merge practice questions into the suite.
+
+        A case already in the suite under another id keeps that id and gains
+        the known answer if it had none.
+        """
+        ids = {c["id"] for c in self.benchmarks}
+        by_request = {c["request"].strip().lower(): c
+                      for c in self.benchmarks}
+        changed = False
+        for case in cases:
+            if case["id"] in ids:
+                continue
+            existing = by_request.get(case["request"].strip().lower())
+            if existing is None:
+                self.benchmarks.append({**case, "source": "practice"})
+                changed = True
+            elif not existing.get("expected"):
+                existing["expected"] = case["expected"]
+                changed = True
+        if changed:
+            self.save()
+
+    def next_practice_cases(self, limit: int) -> list[dict[str, Any]]:
+        """Cases with a known answer, least recently practised first."""
+        cases = [c for c in self.benchmarks if c.get("expected")]
+        cases.sort(key=lambda c: c.get("last_practiced", ""))
+        return cases[:limit]
+
+    def mark_practiced(self, case: dict[str, Any]) -> None:
+        case["last_practiced"] = _now()
+        self.save()
+
     def select_benchmarks(self, must_include: list[str],
                           limit: int) -> list[dict[str, Any]]:
-        """The cases that triggered a change, then seeds, then other cases."""
+        """The cases that triggered a change, then seeds, then cases with a
+        known answer, then the rest."""
         by_id = {c["id"]: c for c in self.benchmarks}
         chosen = [by_id[i] for i in must_include if i in by_id]
         rest = sorted((c for c in self.benchmarks if c not in chosen),
-                      key=lambda c: c["source"] != "seed")
+                      key=lambda c: (c["source"] != "seed",
+                                     not c.get("expected")))
         for case in rest:
             if len(chosen) >= max(limit, len(must_include)):
                 break

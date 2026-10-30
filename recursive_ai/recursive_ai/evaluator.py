@@ -42,6 +42,20 @@ def looks_computational(text: str) -> bool:
         and bool(_MATH_WORDS.search(text))
 
 
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+
+
+def has_term(text: str, term: str) -> bool:
+    """True if term appears as a whole word or number.
+
+    "391" matches "It is 391." but not "3910" or "0.391". Thousands
+    separators are ignored, so "86400" matches "86,400".
+    """
+    text = _THOUSANDS.sub("", text.lower())
+    pattern = rf"(?<![\w.]){re.escape(term.lower())}(?!\w|\.\d)"
+    return re.search(pattern, text) is not None
+
+
 @dataclass
 class Issue:
     mode: str
@@ -70,6 +84,20 @@ def _clamp(value: Any) -> float:
         return min(1.0, max(0.0, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _score(metrics: dict[str, float], issues: list[Issue],
+           config: dict[str, Any]) -> Evaluation:
+    weights = config["evaluator"]["weights"]
+    total = sum(weights.get(k, 0) for k in metrics)
+    score = sum(v * weights.get(k, 0) for k, v in metrics.items()) / total \
+        if total else 0.0
+    safe = not any(i.mode == "unsafe_output" for i in issues)
+    if not safe:
+        score = 0.0
+    passed = (score >= config["evaluator"]["pass_threshold"] and safe
+              and metrics.get("expected", 1.0) == 1.0)
+    return Evaluation(score, passed, metrics, issues)
 
 
 class Evaluator:
@@ -108,28 +136,40 @@ class Evaluator:
             issues.append(Issue("ungrounded_math",
                                 "computed a numeric answer without a tool"))
 
-        if expected and expected.get("contains"):
-            wanted = expected["contains"]
-            hits = sum(1 for w in wanted if w.lower() in draft.answer.lower())
-            metrics["expected"] = hits / len(wanted)
-            if hits < len(wanted):
-                issues.append(Issue("expected_mismatch",
-                                    f"answer missing {wanted}"))
-
         unsafe = self.screen.check_output(draft.answer, config)
-        safe = unsafe is None
-        if not safe:
+        if unsafe is not None:
             issues.append(Issue("unsafe_output", f"matched {unsafe!r}"))
 
-        weights = config["evaluator"]["weights"]
-        total = sum(weights.get(k, 0) for k in metrics)
-        score = sum(v * weights.get(k, 0) for k, v in metrics.items()) / total \
-            if total else 0.0
-        if not safe:
-            score = 0.0
-        passed = (score >= config["evaluator"]["pass_threshold"] and safe
-                  and metrics.get("expected", 1.0) == 1.0)
-        return Evaluation(score, passed, metrics, issues)
+        evaluation = _score(metrics, issues, config)
+        if expected:
+            evaluation = self.check_expected(evaluation, draft.answer,
+                                             expected, config)
+        return evaluation
+
+    @staticmethod
+    def check_expected(evaluation: Evaluation, answer: str,
+                       expected: dict[str, Any],
+                       config: dict[str, Any]) -> Evaluation:
+        """Grade against a known answer, without another model call.
+
+        "contains" items must appear anywhere in the answer; "terms" must
+        appear as whole words or numbers. The issue does not quote the
+        known answer, so the learner cannot simply memorise it.
+        """
+        contains = expected.get("contains") or []
+        terms = expected.get("terms") or []
+        wanted = len(contains) + len(terms)
+        if not wanted:
+            return evaluation
+        missing = [w for w in contains if w.lower() not in answer.lower()]
+        missing += [t for t in terms if not has_term(answer, t)]
+        metrics = {**evaluation.metrics,
+                   "expected": 1 - len(missing) / wanted}
+        issues = list(evaluation.issues)
+        if missing:
+            issues.append(Issue("expected_mismatch",
+                                "answer does not match the known answer"))
+        return _score(metrics, issues, config)
 
     def _judge(self, request, draft, config, metrics, issues) -> None:
         tool_trace = "\n".join(

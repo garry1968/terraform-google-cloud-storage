@@ -9,8 +9,11 @@
     python -m recursive_ai rollback 3
     python -m recursive_ai audit
     python -m recursive_ai benchmark
+    python -m recursive_ai practice --cases 5 --max-cost 1
 
 Add --offline to use the deterministic stand-in model (no API key needed).
+Commands that call the model stop at --max-cost (estimated US dollars) or
+--max-calls, whichever comes first, and exit with code 3.
 """
 
 from __future__ import annotations
@@ -20,11 +23,12 @@ import getpass
 import json
 import sys
 
-from .llm import ClaudeLLM, OfflineLLM
+from .llm import Budget, BudgetExceeded, ClaudeLLM, OfflineLLM
 from .orchestrator import Orchestrator
 
 # Commands that call the model. Read-only commands never do.
-MODEL_COMMANDS = {"ask", "chat", "approve", "benchmark"}
+MODEL_COMMANDS = {"ask", "chat", "approve", "benchmark", "practice"}
+BUDGET_STOPPED = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,11 +41,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="claude-opus-5-5")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("ask", help="answer one request").add_argument("text")
-    sub.add_parser("chat", help="interactive session")
+    budget = argparse.ArgumentParser(add_help=False)
+    budget.add_argument("--max-cost", type=float, default=1.00,
+                        help="stop before spending more than this many US "
+                             "dollars (estimated) in this run")
+    budget.add_argument("--max-calls", type=int, default=300,
+                        help="stop after this many API calls in this run")
+
+    sub.add_parser("ask", parents=[budget],
+                   help="answer one request").add_argument("text")
+    sub.add_parser("chat", parents=[budget], help="interactive session")
     sub.add_parser("approvals", help="list changes awaiting approval")
     for name in ("approve", "reject"):
-        p = sub.add_parser(name, help=f"{name} a queued change")
+        p = sub.add_parser(name, parents=[budget] if name == "approve" else [],
+                           help=f"{name} a queued change")
         p.add_argument("proposal_id")
         p.add_argument("--by", default=getpass.getuser())
         p.add_argument("--note", default="")
@@ -51,7 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by", default=getpass.getuser())
     p = sub.add_parser("audit", help="show recent audit events")
     p.add_argument("-n", type=int, default=20)
-    sub.add_parser("benchmark", help="run the regression suite")
+    sub.add_parser("benchmark", parents=[budget],
+                   help="run the regression suite")
+    p = sub.add_parser("practice", parents=[budget],
+                       help="answer practice questions with known answers "
+                            "and learn from the mistakes")
+    p.add_argument("--cases", type=int, default=5,
+                   help="how many questions to practise this run")
     return parser
 
 
@@ -61,8 +80,25 @@ def main(argv: list[str] | None = None) -> int:
         llm = OfflineLLM()
     else:
         llm = ClaudeLLM(model=args.model)
+    budget = None
+    if args.command in MODEL_COMMANDS:
+        llm = budget = Budget(llm, args.max_calls, args.max_cost)
     ai = Orchestrator(llm, args.state_dir)
 
+    code = 0
+    try:
+        run(ai, args)
+    except BudgetExceeded as exc:
+        print(f"Stopped: {exc}. Any change still being tested was rolled "
+              "back, and an approved one went back in the queue. Raise the "
+              "cap with --max-cost or --max-calls.")
+        code = BUDGET_STOPPED
+    if budget:
+        print(budget.summary())
+    return code
+
+
+def run(ai: Orchestrator, args: argparse.Namespace) -> None:
     if args.command == "ask":
         print(ai.handle(args.text).text)
     elif args.command == "chat":
@@ -102,11 +138,23 @@ def main(argv: list[str] | None = None) -> int:
         for event in ai.audit.tail(args.n):
             print(json.dumps(event))
     elif args.command == "benchmark":
-        result = ai.benchmark()
-        for case_id, score in result.scores.items():
-            print(f"{case_id}: {score:.2f}")
-        print(f"mean: {result.mean:.2f}")
-    return 0
+        scores = []
+        try:
+            for case_id, score in ai.benchmark():
+                scores.append(score)
+                print(f"{case_id}: {score:.2f}")
+        finally:
+            if scores:
+                print(f"mean: {sum(scores) / len(scores):.2f} "
+                      f"over {len(scores)} cases")
+    elif args.command == "practice":
+        items = []
+        try:
+            for item in ai.practice(args.cases):
+                items.append(item)
+                print("\n".join(ai.output.practice_lines(len(items), item)))
+        finally:
+            print("\n".join(ai.output.practice_summary(items)))
 
 
 if __name__ == "__main__":

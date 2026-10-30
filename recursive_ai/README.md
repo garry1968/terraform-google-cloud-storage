@@ -19,6 +19,9 @@ python -m recursive_ai --offline approve <ID> --note "looks right"
 python -m recursive_ai ask "Explain how a B-tree stays balanced."
 python -m recursive_ai chat
 
+# Learn without a human asking: practise questions with known answers
+python -m recursive_ai practice --cases 5 --max-cost 1
+
 pytest -q
 ```
 
@@ -41,7 +44,8 @@ an API key.
 | Safety / approval gate | `safety.py` | Risk rules, approval queue, audit log, content screen |
 | Output | `output.py` | Answer + confidence + learning notes |
 | Config | `config.py` | Versioned config; every change is a snapshot |
-| Model | `llm.py` | `ClaudeLLM` and `OfflineLLM` |
+| Model | `llm.py` | `ClaudeLLM`, `OfflineLLM`, and the `Budget` spending cap |
+| Practice set | `practice.py` | Questions with known answers for unattended learning |
 
 ## The loop
 
@@ -71,6 +75,33 @@ proposed again.
 Self-correction per request: revise when confidence is low or checks fail
 (up to `self_correction.max_revisions`); compare several candidates when the
 planner rates a request high-complexity.
+
+## Unattended learning
+
+`practice` works through questions with known answers (40 in `practice.py`,
+plus the seed cases), least recently practised first, and learns from the
+ones it gets wrong. Self-correction never sees the known answer: it is
+checked once, at the end, as a whole word or number ("391" does not match
+"3910"). The issue it raises does not quote the answer, so the learner
+cannot memorise it. Retests prefer cases with known answers, so a change has
+to fix real answers, not just please the LLM judge.
+
+An issue that keeps coming back on answers that pass (`ungrounded_math`,
+`low_confidence`, `tool_error`, `permission_denied`) also triggers learning
+once it has come up `learning.recurring_issue_threshold` times (default 3)
+since it was last addressed. Like the rest of `learning`, only a human can
+change that number.
+
+## Spending cap
+
+Every command that calls the model stops once its estimated spend reaches
+`--max-cost` (US dollars, default 1.00) or it has made `--max-calls`
+(default 300), whichever comes first, and exits with code 3. The last call
+can take it slightly over. Spend is estimated from each response's token
+usage at the model's list price. A change whose retest is cut short is
+rolled back and not counted as failed; an approved one goes back in the
+approval queue. Learning is the expensive part: one failure can retest two
+changes on up to `learning.max_benchmark_cases` cases each.
 
 ## Risk rules
 
