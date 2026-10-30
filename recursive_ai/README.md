@@ -93,6 +93,36 @@ once it has come up `learning.recurring_issue_threshold` times (default 3)
 since it was last addressed. Like the rest of `learning`, only a human can
 change that number.
 
+## Baseline evaluation
+
+`baseline` tests one question: does the system beat the model it runs on?
+It runs generated tasks with known answers (maths, logic, ARC-style grid
+puzzles, maze planning, reading code, and finding a hidden rule) under three
+conditions, all on the same model and settings:
+
+| Condition | What runs |
+|---|---|
+| `plain` | One call to the model, no tools |
+| `tools` | The responder with its tools and default settings |
+| `full` | The whole pipeline with the learned settings and memory |
+
+It prints accuracy, cost and time per task for each condition, results by
+category, and how often each condition beat `plain` on the same task, with a
+sign test. With `--trials 2` or more it also shows how consistent each one is.
+
+- Tasks are generated from seeds, so they are new to every model. Each
+  possible task belongs to exactly one split, `dev` or `holdout`, by a hash
+  of its text. Use `dev` while improving the system; keep `holdout` for
+  milestone comparisons.
+- Nothing is learned or saved: `full` runs on a throwaway copy of the state
+  folder, and the learning code never imports the tasks.
+- It spends money like any model command and stops at `--max-cost`. Try it
+  for free with `--offline`.
+
+```bash
+python -m recursive_ai baseline --split dev --per-category 2 --trials 1 --out results.json
+```
+
 ## Spending cap
 
 Every command that calls the model stops once its estimated spend reaches

@@ -69,6 +69,7 @@ DEFAULT_EFFORT = {
 PRICES = {
     "claude-opus-5-5": (4.00, 20.00, 0.20),
     "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),  # prompts up to 100K tokens
     "claude-fable-5-1": (10.00, 50.00, 0.25),
 }
 
@@ -152,11 +153,13 @@ class ClaudeLLM:
             "messages": messages,
             "output_config": output_config,
             "cache_control": {"type": "ephemeral"},
-            # Server-side fallback: a declined request is retried on a
-            # recommended fallback model instead of failing outright.
-            "betas": ["server-side-fallback-2026-07-01"],
-            "fallbacks": "default",
         }
+        # Server-side fallback: a declined request is retried on a
+        # recommended fallback model instead of failing outright. Claude
+        # Haiku 5.5 has no fallback, so it gets neither field.
+        if not self.model.startswith("claude-haiku"):
+            kwargs["betas"] = ["server-side-fallback-2026-07-01"]
+            kwargs["fallbacks"] = "default"
         if tools:
             kwargs["tools"] = tools
 

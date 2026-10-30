@@ -10,6 +10,7 @@
     python -m recursive_ai audit
     python -m recursive_ai benchmark
     python -m recursive_ai practice --cases 5 --max-cost 1
+    python -m recursive_ai baseline --split dev --per-category 2 --trials 1
     python -m recursive_ai load --repo https://github.com/you/ai-memory
     python -m recursive_ai save
 
@@ -29,16 +30,22 @@ import getpass
 import json
 import os
 import sys
+import tempfile
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import sync
-from .llm import Budget, BudgetExceeded, ClaudeLLM, OfflineLLM
+from .baseline import CONDITIONS, Baseline, summarize
+from .llm import LLM, Budget, BudgetExceeded, ClaudeLLM, OfflineLLM
 from .orchestrator import Orchestrator
+from .tasks import SPLITS, make_tasks
 
 # Commands that call the model. Read-only commands never do.
-MODEL_COMMANDS = {"ask", "chat", "approve", "benchmark", "practice"}
+MODEL_COMMANDS = {"ask", "chat", "approve", "benchmark", "practice",
+                  "baseline"}
 # Commands that never change the memory, so there is nothing to save.
-READ_ONLY_COMMANDS = {"approvals", "history", "audit"}
+READ_ONLY_COMMANDS = {"approvals", "history", "audit", "baseline"}
 MEMORY_REPO_ENV = "RECURSIVE_AI_MEMORY_REPO"
 BUDGET_STOPPED = 3
 MEMORY_NOT_SAVED = 4
@@ -84,6 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
                             "and learn from the mistakes")
     p.add_argument("--cases", type=int, default=5,
                    help="how many questions to practise this run")
+    p = sub.add_parser("baseline", parents=[budget],
+                       help="compare plain Claude, Claude with tools and the "
+                            "full system on generated tasks; changes nothing")
+    p.add_argument("--split", choices=SPLITS, default="dev",
+                   help="holdout tasks are for milestone comparisons only")
+    p.add_argument("--per-category", type=_positive, default=2)
+    p.add_argument("--trials", type=_positive, default=1)
+    p.add_argument("--conditions", type=_conditions,
+                   default=",".join(CONDITIONS),
+                   help=f"comma-separated, from {', '.join(CONDITIONS)}")
+    p.add_argument("--out", help="also write every result to this JSON file")
     p = sub.add_parser("load", help="connect the memory to a git repository, "
                                     "or bring it up to date")
     p.add_argument("--repo", default=os.environ.get(MEMORY_REPO_ENV),
@@ -91,6 +109,21 @@ def build_parser() -> argparse.ArgumentParser:
                         f"${MEMORY_REPO_ENV})")
     sub.add_parser("save", help="save the memory to its repository now")
     return parser
+
+
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def _conditions(text: str) -> tuple[str, ...]:
+    chosen = tuple(c.strip() for c in text.split(",") if c.strip())
+    if not chosen or any(c not in CONDITIONS for c in chosen):
+        raise argparse.ArgumentTypeError(
+            f"choose from {', '.join(CONDITIONS)}")
+    return chosen
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,11 +140,13 @@ def main(argv: list[str] | None = None) -> int:
     budget = None
     if args.command in MODEL_COMMANDS:
         llm = budget = Budget(llm, args.max_calls, args.max_cost)
-    ai = Orchestrator(llm, args.state_dir)
 
     code = 0
     try:
-        run(ai, args)
+        if args.command == "baseline":
+            run_baseline(llm, args)
+        else:
+            run(Orchestrator(llm, args.state_dir), args)
     except BudgetExceeded as exc:
         print(f"Stopped: {exc}. Any change still being tested was rolled "
               "back, and an approved one went back in the queue. Raise the "
@@ -175,6 +210,34 @@ def save_after(state_dir: Path, command: str) -> bool:
               "run: python -m recursive_ai save")
         return False
     return True
+
+
+def run_baseline(llm: LLM, args: argparse.Namespace) -> None:
+    conditions = args.conditions
+    tasks = make_tasks(args.split, args.per_category)
+    results = []
+    with tempfile.TemporaryDirectory() as workdir:
+        baseline = Baseline(llm, Path(args.state_dir), Path(workdir))
+        try:
+            for result in baseline.run(tasks, conditions, args.trials):
+                results.append(result)
+                if result.error:
+                    print(f"  {result.condition} error: {result.error}")
+                if result.condition == conditions[-1]:
+                    marks = "  ".join(
+                        f"{r.condition} {'right' if r.correct else 'WRONG'}"
+                        for r in results[-len(conditions):])
+                    print(f"{result.task} (trial {result.trial}): {marks}")
+        finally:
+            print("\n".join(summarize(results, conditions)))
+            if args.out:
+                Path(args.out).write_text(json.dumps({
+                    "model": "offline" if args.offline else args.model,
+                    "split": args.split, "per_category": args.per_category,
+                    "trials": args.trials, "conditions": conditions,
+                    "finished": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"),
+                    "results": [asdict(r) for r in results]}, indent=1))
 
 
 def run(ai: Orchestrator, args: argparse.Namespace) -> None:
