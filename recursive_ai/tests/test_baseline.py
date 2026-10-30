@@ -17,41 +17,59 @@ from recursive_ai.baseline import (
     summarize,
 )
 from recursive_ai.llm import Budget, ClaudeLLM, OfflineLLM
-from recursive_ai.tasks import CATEGORIES, grade, make_tasks, split_of
+from recursive_ai.tasks import (
+    CATEGORIES,
+    SOLVED,
+    _coin_ways,
+    _colourings,
+    _ice_moves,
+    _jug_steps,
+    _key_maze_moves,
+    _tiles_by_distance,
+    families,
+    grade,
+    make_tasks,
+)
 
 
 def as_reply(task, answer):
     if task.kind == "grid":
         rows = "\n".join(" ".join(str(v) for v in row) for row in answer)
         return f"Working it out...\nAnswer:\n{rows}"
+    if task.kind == "names":
+        return f"Working it out...\nAnswer: {', '.join(answer)}"
     return f"Working it out...\nAnswer: {answer}"
 
 
-def test_splits_never_share_a_task_and_are_reproducible():
+def test_splits_share_no_kind_of_problem_and_are_reproducible():
     dev, holdout = make_tasks("dev", 20), make_tasks("holdout", 20)
     assert len(dev) == 20 * len(CATEGORIES)
+    for cat in CATEGORIES:
+        assert len(families(cat, "dev")) >= 2
+        assert len(families(cat, "holdout")) >= 2
+    assert not {t.family for t in dev} & {t.family for t in holdout}
     assert not {t.prompt for t in dev} & {t.prompt for t in holdout}
     assert len({t.prompt for t in dev}) == len(dev)
-    assert all(split_of(t.prompt) == "holdout" for t in holdout)
     assert [t.prompt for t in make_tasks("dev", 20)] == \
         [t.prompt for t in dev]
 
 
 def test_known_answers_grade_right_and_others_wrong():
-    for task in make_tasks("dev", 15) + make_tasks("holdout", 15):
+    for task in make_tasks("dev", 12) + make_tasks("holdout", 12):
         assert grade(task, as_reply(task, task.answer)), task.id
         wrong = {"number": lambda a: a + 1,
                  "text": lambda a: a + "x",
                  "name": lambda a: next(n for n in task.choices if n != a),
+                 "names": lambda a: sorted(set(task.choices) - set(a)),
                  "grid": lambda a: [[(v + 1) % 10 for v in row]
                                     for row in a]}[task.kind](task.answer)
         assert not grade(task, as_reply(task, wrong)), task.id
 
 
 def test_grader_reads_common_answer_formats():
-    number, name, grid, text = (
+    number, name, names, grid, text = (
         next(t for t in make_tasks("dev", 30) if t.kind == kind)
-        for kind in ("number", "name", "grid", "text"))
+        for kind in ("number", "name", "names", "grid", "text"))
     assert grade(number, f"So it is...\nAnswer: **{number.answer:,}**")
     assert grade(number, str(number.answer))
     assert not grade(number, f"Not {number.answer}: it is "
@@ -60,7 +78,26 @@ def test_grader_reads_common_answer_formats():
     assert grade(grid, f"The rule flips it.\nAnswer:\n```\n{rows}\n```")
     other = next(n for n in name.choices if n != name.answer)
     assert not grade(name, f"Answer: {name.answer} or {other}")
+    assert grade(names, "Answer: " + " and ".join(reversed(names.answer)))
+    extra = next(n for n in names.choices if n not in names.answer)
+    assert not grade(names, "Answer: " + ", ".join(names.answer + [extra]))
     assert grade(text, f"Answer: `{text.answer}`")
+
+
+def test_search_answers_match_hand_solved_puzzles():
+    assert _jug_steps(3, 5, 4) == 6
+    assert _coin_ways([1, 2, 5], 5) == 4
+    # A-B-C is a triangle (6 ways); D and E are free (3 ways each).
+    assert _colourings([("A", "B"), ("B", "C"), ("A", "C")]) == 6 * 3 * 3
+    layouts = _tiles_by_distance()
+    assert layouts[0] == [SOLVED]
+    assert sum(len(v) for v in layouts.values()) == 181_440
+    assert (1, 2, 3, 4, 5, 6, 7, 0, 8) in layouts[1]
+    # Right, down, left: the slide passes nothing it could stop on sooner.
+    assert _ice_moves(["S..#", "#...", "G..."], (0, 0)) == 3
+    # 4 moves to the key, then 6 back through the door to G.
+    assert _key_maze_moves(["S.D.G", "#.###", "k...."], (0, 0)) == 10
+    assert _key_maze_moves(["S.D.G", "#.###", "....."], (0, 0)) is None
 
 
 def test_baseline_runs_every_condition_and_changes_nothing(make_ai,

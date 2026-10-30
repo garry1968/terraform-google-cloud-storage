@@ -96,9 +96,9 @@ change that number.
 ## Baseline evaluation
 
 `baseline` tests one question: does the system beat the model it runs on?
-It runs generated tasks with known answers (maths, logic, ARC-style grid
-puzzles, maze planning, reading code, and finding a hidden rule) under three
-conditions, all on the same model and settings:
+It runs generated tasks with known answers in six categories (maths, logic,
+ARC-style grid puzzles, planning, code, and finding a hidden rule) under
+three conditions, all on the same model and settings:
 
 | Condition | What runs |
 |---|---|
@@ -110,10 +110,14 @@ It prints accuracy, cost and time per task for each condition, results by
 category, and how often each condition beat `plain` on the same task, with a
 sign test. With `--trials 2` or more it also shows how consistent each one is.
 
-- Tasks are generated from seeds, so they are new to every model. Each
-  possible task belongs to exactly one split, `dev` or `holdout`, by a hash
-  of its text. Use `dev` while improving the system; keep `holdout` for
+- Tasks come in 24 families, each one kind of problem (for example
+  sliding-tile puzzles, or knights and knaves). Each family belongs to one
+  split, so `holdout` tests kinds of problem never seen in `dev`, not just
+  new numbers. Use `dev` while improving the system; keep `holdout` for
   milestone comparisons.
+- Tasks are generated from seeds, so none can be in a model's training
+  data. Answers come from code (search, brute force, or running our own
+  programs), never from a model.
 - Nothing is learned or saved: `full` runs on a throwaway copy of the state
   folder, and the learning code never imports the tasks.
 - It spends money like any model command and stops at `--max-cost`. Try it
