@@ -90,7 +90,7 @@ def test_budget_caps_estimated_cost():
         content=[SimpleNamespace(type="text", text="{}")])
     client = SimpleNamespace(beta=SimpleNamespace(
         messages=SimpleNamespace(create=lambda **kwargs: response)))
-    llm = ClaudeLLM(client=client)
+    llm = ClaudeLLM(client=client, max_tokens=100)
     budget = Budget(llm, max_calls=10, max_cost=0.02)
     call = {"purpose": "plan", "system": "",
             "messages": [{"role": "user", "content": "hi"}]}
@@ -101,6 +101,31 @@ def test_budget_caps_estimated_cost():
     budget.generate(**call)
     with pytest.raises(BudgetExceeded):
         budget.generate(**call)
+
+
+def test_budget_never_starts_a_call_that_could_cross_the_cap():
+    calls = []
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: calls.append(kwargs))))
+    # 16,000 output tokens at $20/M alone could cost $0.32.
+    budget = Budget(ClaudeLLM(client=client), max_calls=10, max_cost=0.30)
+    with pytest.raises(BudgetExceeded, match="could have gone over"):
+        budget.generate(purpose="plan", system="",
+                        messages=[{"role": "user", "content": "hi"}])
+    assert calls == []
+
+
+def test_proposals_only_mode_queues_every_change(make_ai):
+    ai = make_ai()
+    config = ai.store.current
+    config["learning"]["auto_apply_max_risk"] = "none"
+    version = ai.store.commit(config, "human: proposals-only")
+
+    reply = ai.handle("What is 12 times 7?")
+    assert reply.learning.outcomes
+    assert {o.status for o in reply.learning.outcomes} == {
+        "awaiting_approval"}
+    assert ai.store.version == version
 
 
 def test_budget_stop_rolls_back_and_requeues_approved_change(make_ai):

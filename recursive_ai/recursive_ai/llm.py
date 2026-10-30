@@ -69,8 +69,14 @@ DEFAULT_EFFORT = {
 PRICES = {
     "claude-opus-5-5": (4.00, 20.00, 0.20),
     "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),  # prompts up to 100K tokens
     "claude-fable-5-1": (10.00, 50.00, 0.25),
 }
+
+
+def price_of(model: str) -> tuple[float, float, float]:
+    return next((p for name, p in PRICES.items() if model.startswith(name)),
+                max(PRICES.values()))
 
 
 @dataclass
@@ -80,9 +86,7 @@ class Usage:
     cost: float = 0.0  # estimated US dollars
 
     def add(self, usage: Any, model: str) -> None:
-        price_in, price_out, price_read = next(
-            (p for name, p in PRICES.items() if model.startswith(name)),
-            max(PRICES.values()))
+        price_in, price_out, price_read = price_of(model)
 
         def count(name: str) -> int:
             return getattr(usage, name, 0) or 0
@@ -98,7 +102,11 @@ class Usage:
 
 
 class Budget:
-    """Caps the model calls and estimated spend of one run. Wraps any LLM."""
+    """Caps the model calls and estimated spend of one run. Wraps any LLM.
+
+    A call starts only if the estimated spend stays within the cap even if
+    that call costs the most it can, so a run never goes over its cap.
+    """
 
     def __init__(self, llm: LLM, max_calls: int, max_cost: float):
         self.llm = llm
@@ -115,9 +123,13 @@ class Budget:
         if self.calls >= self.max_calls:
             raise BudgetExceeded(
                 f"reached the cap of {self.max_calls} API calls")
-        if self.cost >= self.max_cost:
+        worst_case = getattr(self.llm, "max_call_cost", None)
+        if self.cost + (worst_case(**kwargs) if worst_case else 0.0) \
+                > self.max_cost:
             raise BudgetExceeded(
-                f"reached the ${self.max_cost:.2f} spending cap")
+                f"reached the ${self.max_cost:.2f} spending cap (spent "
+                f"about ${self.cost:.2f}; the next call could have gone "
+                "over)")
         self.calls += 1
         return self.llm.generate(**kwargs)
 
@@ -138,6 +150,15 @@ class ClaudeLLM:
         self.max_tokens = max_tokens
         self.usage = Usage()
 
+    def max_call_cost(self, *, system="", messages=(), tools=None,
+                      schema=None, **_: Any) -> float:
+        """The most this call can cost: every output token used, and the
+        request counted at 2 characters per token, which overestimates."""
+        price_in, price_out, _read = price_of(self.model)
+        request = json.dumps([system, messages, tools, schema], default=str)
+        return (len(request) / 2 * price_in
+                + self.max_tokens * price_out) / 1_000_000
+
     def generate(self, *, purpose, system, messages, tools=None,
                  schema=None) -> LLMResponse:
         output_config: dict[str, Any] = {
@@ -152,11 +173,13 @@ class ClaudeLLM:
             "messages": messages,
             "output_config": output_config,
             "cache_control": {"type": "ephemeral"},
-            # Server-side fallback: a declined request is retried on a
-            # recommended fallback model instead of failing outright.
-            "betas": ["server-side-fallback-2026-07-01"],
-            "fallbacks": "default",
         }
+        # Server-side fallback: a declined request is retried on a
+        # recommended fallback model instead of failing outright. Claude
+        # Haiku 5.5 has no fallback, so it gets neither field.
+        if not self.model.startswith("claude-haiku"):
+            kwargs["betas"] = ["server-side-fallback-2026-07-01"]
+            kwargs["fallbacks"] = "default"
         if tools:
             kwargs["tools"] = tools
 

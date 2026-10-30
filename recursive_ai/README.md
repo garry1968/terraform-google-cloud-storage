@@ -93,16 +93,60 @@ once it has come up `learning.recurring_issue_threshold` times (default 3)
 since it was last addressed. Like the rest of `learning`, only a human can
 change that number.
 
+## Baseline evaluation
+
+`baseline` tests one question: does the system beat the model it runs on?
+It runs generated tasks with known answers in six categories (maths, logic,
+ARC-style grid puzzles, planning, code, and finding a hidden rule) under
+three conditions, all on the same model and settings:
+
+| Condition | What runs |
+|---|---|
+| `plain` | One call to the model, no tools |
+| `tools` | The responder with its tools and default settings |
+| `full` | The whole pipeline with the learned settings and memory |
+
+It prints accuracy, cost and time per task for each condition, results by
+category, and how often each condition beat `plain` on the same task, with a
+sign test. With `--trials 2` or more it also shows how consistent each one is.
+
+- Tasks come in 24 families, each one kind of problem (for example
+  sliding-tile puzzles, or knights and knaves). Each family belongs to one
+  split, so `holdout` tests kinds of problem never seen in `dev`, not just
+  new numbers. Use `dev` while improving the system; keep `holdout` for
+  milestone comparisons.
+- Tasks are generated from seeds, so none can be in a model's training
+  data. Answers come from code (search, brute force, or running our own
+  programs), never from a model.
+- Nothing is learned or saved: `full` runs on a throwaway copy of the state
+  folder, and the learning code never imports the tasks.
+- It spends money like any model command and stops at `--max-cost`. Try it
+  for free with `--offline`.
+
+```bash
+python -m recursive_ai baseline --split dev --per-category 2 --trials 1 --out results.json
+```
+
 ## Spending cap
 
-Every command that calls the model stops once its estimated spend reaches
-`--max-cost` (US dollars, default 1.00) or it has made `--max-calls`
-(default 300), whichever comes first, and exits with code 3. The last call
-can take it slightly over. Spend is estimated from each response's token
-usage at the model's list price. A change whose retest is cut short is
-rolled back and not counted as failed; an approved one goes back in the
+Every command that calls the model stops at `--max-cost` (US dollars,
+default 1.00) or `--max-calls` (default 300), whichever comes first, and
+exits with code 3. A call starts only if the run would stay within
+`--max-cost` even if that call cost the most it can: all `max_tokens` of
+output, plus the request counted at 2 characters per token. So a run never
+goes over its cap, but it may stop with up to one call's worth unspent
+(about $0.33 on Claude Opus 5.5, under $0.01 on Claude Haiku 5.5).
+
+Spend is estimated from each response's token usage at the list prices in
+`llm.py`, so it is only as accurate as that table. `--max-calls` counts
+every model call, including tool rounds, self-checks and revisions. When the
+SDK retries a failed request (up to twice, after rate-limit or server
+errors), that still counts as one call. A change whose retest is cut short
+is rolled back and not counted as failed; an approved one goes back in the
 approval queue. Learning is the expensive part: one failure can retest two
-changes on up to `learning.max_benchmark_cases` cases each.
+changes on up to `learning.max_benchmark_cases` cases each. With
+`learning.auto_apply_max_risk` set to `none` (proposals only), nothing is
+retested until you approve it.
 
 ## Risk rules
 
