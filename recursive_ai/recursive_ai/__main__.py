@@ -10,10 +10,16 @@
     python -m recursive_ai audit
     python -m recursive_ai benchmark
     python -m recursive_ai practice --cases 5 --max-cost 1
+    python -m recursive_ai load --repo https://github.com/you/ai-memory
+    python -m recursive_ai save
 
 Add --offline to use the deterministic stand-in model (no API key needed).
 Commands that call the model stop at --max-cost (estimated US dollars) or
 --max-calls, whichever comes first, and exit with code 3.
+
+After load, every command that can change the memory saves it to that
+repository when it finishes, and exits with code 4 if saving failed. With
+RECURSIVE_AI_MEMORY_REPO set, a new machine loads the memory by itself.
 """
 
 from __future__ import annotations
@@ -21,14 +27,21 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
+from pathlib import Path
 
+from . import sync
 from .llm import Budget, BudgetExceeded, ClaudeLLM, OfflineLLM
 from .orchestrator import Orchestrator
 
 # Commands that call the model. Read-only commands never do.
 MODEL_COMMANDS = {"ask", "chat", "approve", "benchmark", "practice"}
+# Commands that never change the memory, so there is nothing to save.
+READ_ONLY_COMMANDS = {"approvals", "history", "audit"}
+MEMORY_REPO_ENV = "RECURSIVE_AI_MEMORY_REPO"
 BUDGET_STOPPED = 3
+MEMORY_NOT_SAVED = 4
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,11 +84,22 @@ def build_parser() -> argparse.ArgumentParser:
                             "and learn from the mistakes")
     p.add_argument("--cases", type=int, default=5,
                    help="how many questions to practise this run")
+    p = sub.add_parser("load", help="connect the memory to a git repository, "
+                                    "or bring it up to date")
+    p.add_argument("--repo", default=os.environ.get(MEMORY_REPO_ENV),
+                   help="URL of a private git repository (default: "
+                        f"${MEMORY_REPO_ENV})")
+    sub.add_parser("save", help="save the memory to its repository now")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    state_dir = Path(args.state_dir)
+    if args.command in ("load", "save"):
+        return memory_command(state_dir, args)
+    load_before(state_dir)
+
     if args.offline or args.command not in MODEL_COMMANDS:
         llm = OfflineLLM()
     else:
@@ -95,7 +119,62 @@ def main(argv: list[str] | None = None) -> int:
         code = BUDGET_STOPPED
     if budget:
         print(budget.summary())
+    if args.command not in READ_ONLY_COMMANDS \
+            and not save_after(state_dir, args.command) and code == 0:
+        code = MEMORY_NOT_SAVED
     return code
+
+
+def memory_command(state_dir: Path, args: argparse.Namespace) -> int:
+    try:
+        if args.command == "load":
+            print(sync.load(state_dir, args.repo))
+        elif not sync.is_synced(state_dir):
+            print("Memory is not connected to a repository yet. Run: "
+                  "python -m recursive_ai load --repo <URL>")
+            return 1
+        # After load, this uploads a memory that existed before connecting.
+        if sync.save(state_dir, f"recursive_ai {args.command}"):
+            print("Memory saved.")
+        elif args.command == "save":
+            print("Nothing new to save.")
+    except sync.SyncError as exc:
+        print(f"Memory error: {exc}")
+        return 1
+    return 0
+
+
+def load_before(state_dir: Path) -> None:
+    """Bring saved memory up to date, or load it onto a new machine."""
+    repo = os.environ.get(MEMORY_REPO_ENV)
+    synced = sync.is_synced(state_dir)
+    if not synced and not (repo and not state_dir.exists()):
+        if repo:
+            print(f"Memory is not being saved. To connect it to {repo}, "
+                  "run: python -m recursive_ai load")
+        return
+    try:
+        message = sync.load(state_dir, repo)
+    except sync.SyncError as exc:
+        print(f"Memory not updated from its repository ({exc}). Using the "
+              "copy on this machine.")
+        return
+    if not synced:
+        print(message)
+
+
+def save_after(state_dir: Path, command: str) -> bool:
+    """Save the memory if it is connected. False only if saving failed."""
+    if not sync.is_synced(state_dir):
+        return True
+    try:
+        if sync.save(state_dir, f"recursive_ai {command}"):
+            print("Memory saved.")
+    except sync.SyncError as exc:
+        print(f"Memory NOT saved ({exc}). It is still on this machine; "
+              "run: python -m recursive_ai save")
+        return False
+    return True
 
 
 def run(ai: Orchestrator, args: argparse.Namespace) -> None:

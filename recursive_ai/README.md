@@ -46,6 +46,7 @@ an API key.
 | Config | `config.py` | Versioned config; every change is a snapshot |
 | Model | `llm.py` | `ClaudeLLM`, `OfflineLLM`, and the `Budget` spending cap |
 | Practice set | `practice.py` | Questions with known answers for unattended learning |
+| Saving | `sync.py` | Keeps the state folder in a git repository |
 
 ## The loop
 
@@ -134,6 +135,23 @@ Other guarantees:
 
 Stored in `--state-dir` (default `.recursive_ai_state/`): `config.json`,
 `config_history/`, `memory.json`, `approvals.json`, `audit.jsonl`.
+
+### Saving it permanently
+
+The state folder lives on one machine. To keep it, connect it to a git
+repository. Use a private one: the memory holds every question and answer.
+
+```bash
+python -m recursive_ai load --repo https://github.com/you/ai-memory
+```
+
+The folder becomes a clone of that repository. From then on, every command
+that can change it pulls first and pushes when it finishes (`save` does it
+by hand). A failed push keeps everything locally, prints a warning and
+exits with code 4. Set `RECURSIVE_AI_MEMORY_REPO` to the same URL and a new
+machine loads the memory the first time any command runs. `load` will not
+mix two memories: if the folder and the repository both hold one, it stops
+and changes nothing.
 
 ## Claude API settings
 
